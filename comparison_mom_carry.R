@@ -18,7 +18,7 @@ data_raw <- tryCatch({
     select(1, 2, 3) %>%
     set_names(c("date", "price_front", "price_back")) %>%
     mutate(date = as.Date(date)) %>%
-    filter(date >= as.Date("1993-01-01") & date <= as.Date("2022-12-31")) %>%
+    filter(date >= as.Date("1993-01-01") & date <= as.Date("2024-12-31")) %>%
     arrange(date) %>%
     mutate(
       price_front = na.approx(price_front, na.rm = FALSE),
@@ -27,7 +27,7 @@ data_raw <- tryCatch({
     na.omit()
 }, error = function(e) {
   # Dummy data for demo if file missing
-  dts <- seq(as.Date("1993-01-01"), as.Date("2022-12-31"), by="day")
+  dts <- seq(as.Date("1993-01-01"), as.Date("2024-12-31"), by="day")
   data.frame(date = dts, price_front = 50 + cumsum(rnorm(length(dts))), price_back = 48 + cumsum(rnorm(length(dts))))
 })
 

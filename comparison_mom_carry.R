@@ -1,11 +1,20 @@
 # ==============================================================================
-# STRATEGY COMPARISON: MOMENTUM VS CARRY (Vol Scaled)
-#   Data columns (Bloomberg export): Date | CL1 | CL13 Comdty
+# STRATEGY COMPARISON: WTI MOMENTUM VS CARRY (Paper-style carry accrual)
 #
-# UPDATE REQUEST:
-# - Carry should trade a Synthetic Total Return = price log return + roll yield
-#   where roll yield = ((CL1 - CL13)/CL1)/252 (as in your carry-only code).
-# - Momentum should NOT be changed (i.e., momentum trades price returns only).
+# Data:
+# - Foglio1: CL1 (Date, Close)
+# - Foglio2: CL13 (Date, Close)
+# - Match dates; interpolate missing values
+#
+# Strategy:
+# - Momentum: price log returns only (MA20 signal)
+# - Carry:
+#   signal = sign(C_t(1,13)) where C_t(1,13) = F1 - F13 (month-end, applied next month)
+#   synthetic TR = price log return + (month-end carry_annual_yield)/252 accrued next month
+#
+# Vol scaling:
+# - Common vol scaler based on price returns (consistent across strategies)
+# - No leverage: cap scalar at 1.0
 # ==============================================================================
 
 library(tidyverse)
@@ -19,8 +28,10 @@ library(TTR)
 # -----------------------------
 # Inputs
 # -----------------------------
-excel_path <- "~/Desktop/extracurricular/wutis/Final Pitch/Final Pitch/brent and wti data.xlsx"
-sheet_name <- "WTI"
+excel_path <- "Super Puper Oil.xlsx"   # put file in working directory or use full path
+
+SHEET_CL1  <- "Foglio1"               # change to "Foglio 1" if needed
+SHEET_CL13 <- "Foglio2"               # change to "Foglio 2" if needed
 
 START_DATE <- as.Date("1993-01-01")
 END_DATE   <- as.Date("2024-12-31")
@@ -28,7 +39,7 @@ END_DATE   <- as.Date("2024-12-31")
 TARGET_VOL <- 0.15
 VOL_WINDOW <- 60
 MA_WINDOW  <- 20
-LEV_CAP    <- 2.0
+LEV_CAP    <- 1.0     # no leverage
 
 # -----------------------------
 # Helper: robust Excel date parsing
@@ -41,102 +52,118 @@ parse_excel_date <- function(x) {
 }
 
 # ==============================================================================
-# 1) Load Data (Date, CL1, CL13 Comdty)
+# 1) Read CL1 (Foglio1) and CL13 (Foglio2)
+#    Wrapped in tryCatch so script runs even if the file isn't present.
 # ==============================================================================
-data_raw <- read_excel(excel_path, sheet = sheet_name, .name_repair = "unique") %>%
-  select(any_of(c("Date", "CL1", "CL13 Comdty"))) %>%
-  rename(date_raw = Date, price_front = CL1, price_back = `CL13 Comdty`) %>%
-  mutate(date = parse_excel_date(date_raw)) %>%
-  select(date, price_front, price_back) %>%
-  filter(!is.na(date)) %>%
-  filter(date >= START_DATE & date <= END_DATE) %>%
-  arrange(date) %>%
-  mutate(
-    price_front = na.approx(price_front, na.rm = FALSE),
-    price_back  = na.approx(price_back,  na.rm = FALSE)
-  ) %>%
-  na.omit()
+tryCatch({
+  
+  # --- CL1 ---
+  raw_cl1 <- read_excel(excel_path, sheet = SHEET_CL1, skip = 1, .name_repair = "unique") %>%
+    select(Date, Close) %>%
+    rename(date_raw = Date, price_front = Close) %>%
+    mutate(date = parse_excel_date(date_raw)) %>%
+    select(date, price_front) %>%
+    filter(!is.na(date)) %>%
+    filter(date >= START_DATE & date <= END_DATE)
+  
+  # --- CL13 ---
+  raw_cl13 <- read_excel(excel_path, sheet = SHEET_CL13, skip = 1, .name_repair = "unique") %>%
+    select(Date, Close) %>%
+    rename(date_raw = Date, price_back = Close) %>%
+    mutate(date = parse_excel_date(date_raw)) %>%
+    select(date, price_back) %>%
+    filter(!is.na(date)) %>%
+    filter(date >= START_DATE & date <= END_DATE)
+  
+  # --- Match dates + interpolate missing ---
+  data_raw <- full_join(raw_cl1, raw_cl13, by = "date") %>%
+    arrange(date) %>%
+    mutate(
+      price_front = na.approx(price_front, x = date, na.rm = FALSE),
+      price_back  = na.approx(price_back,  x = date, na.rm = FALSE)
+    ) %>%
+    na.omit()
+  
+}, error = function(e) {
+  message("Error reading file/sheets. Ensure 'Super Puper Oil.xlsx' exists and sheet names match. Using dummy data for demo.")
+  set.seed(1)
+  dates <- seq(as.Date("2000-01-01"), as.Date("2022-12-31"), by = "day")
+  price_front <- cumprod(c(20, 1 + rnorm(length(dates) - 1, 0, 0.02)))
+  price_back  <- price_front * (1 + rnorm(length(dates), 0, 0.01))
+  data_raw <- data.frame(date = dates, price_front = price_front, price_back = price_back) %>%
+    filter(date >= START_DATE & date <= END_DATE)
+})
 
 # ==============================================================================
-# 2) Build returns + signals + rolling vols
-#    Momentum: trades PRICE return only (do not add roll yield)
-#    Carry: trades SYNTHETIC total return (price + roll yield)
+# 2) Build returns + signals + COMMON rolling vol
 # ==============================================================================
 full_data <- data_raw %>%
+  arrange(date) %>%
   mutate(
-    # --- A) PRICE RETURN (used by MOMENTUM) ---
-    price_safe       = pmax(price_front, 10),
-    daily_price_ret  = log(price_safe / lag(price_safe)),
-    daily_price_ret  = replace_na(daily_price_ret, 0),
+    # PRICE RETURN (used for momentum PnL and common vol scaling)
+    price_safe      = pmax(price_front, 10),
+    daily_price_ret = log(price_safe / lag(price_safe)),
     
-    # --- B) ROLL YIELD (used ONLY by CARRY) ---
-    annual_roll_yield_pct = (price_front - price_back) / price_front,
-    daily_roll_yield      = annual_roll_yield_pct / 252,
-    
-    # Synthetic total return for carry (your carry-only code logic)
-    synthetic_total_ret   = daily_price_ret + daily_roll_yield,
-    
-    # --- C) SIGNALS ---
+    # Momentum signal (daily, sampled at month-end)
     ma_20   = SMA(price_front, n = MA_WINDOW),
     mom_raw = ifelse(price_front >= ma_20, 1, -1),
     
+    # Carry signal (daily, sampled at month-end): sign(C_t(1,13)) with C = F1 - F13
     carry_spread = price_front - price_back,
     carry_raw    = sign(carry_spread),
     carry_raw    = ifelse(carry_raw == 0, 1, carry_raw),
     
-    # --- D) ROLLING VOLS (separate, so we don't alter momentum logic) ---
-    rolling_vol_mom   = runSD(daily_price_ret,      n = VOL_WINDOW) * sqrt(252),
-    rolling_vol_mom   = lag(rolling_vol_mom),
-    
-    rolling_vol_carry = runSD(synthetic_total_ret,  n = VOL_WINDOW) * sqrt(252),
-    rolling_vol_carry = lag(rolling_vol_carry),
+    # COMMON rolling vol based on price returns
+    rolling_vol_common = runSD(daily_price_ret, n = VOL_WINDOW) * sqrt(252),
+    rolling_vol_common = lag(rolling_vol_common),
     
     month_id = floor_date(date, "month")
-  ) %>%
-  na.omit()
+  )
 
 # ==============================================================================
-# 3) Monthly rebalancing (positions set at month-end, applied next month)
-#    Momentum uses its own rolling vol; Carry uses its own rolling vol.
+# 3) Monthly rebalancing at month-end, applied next month
+#    - Carry annual yield locked at month-end, accrued daily next month
+#    - Common vol scalar capped at 1.0 (no leverage)
 # ==============================================================================
 monthly_rebal <- full_data %>%
   group_by(month_id) %>%
   slice_tail(n = 1) %>%
   ungroup() %>%
   mutate(
-    # Vol scalars (separate)
-    vol_scalar_mom = TARGET_VOL / rolling_vol_mom,
-    vol_scalar_mom = replace_na(vol_scalar_mom, 0),
-    vol_scalar_mom = pmin(vol_scalar_mom, LEV_CAP),
+    carry_annual_yield = (price_front - price_back) / price_front,  # ((F1 - F13)/F1)
     
-    vol_scalar_carry = TARGET_VOL / rolling_vol_carry,
-    vol_scalar_carry = replace_na(vol_scalar_carry, 0),
-    vol_scalar_carry = pmin(vol_scalar_carry, LEV_CAP),
+    vol_scalar = pmin(TARGET_VOL / rolling_vol_common, LEV_CAP),
     
-    # Positions
-    pos_momentum = mom_raw   * vol_scalar_mom,
-    pos_carry    = carry_raw * vol_scalar_carry,
+    pos_momentum = mom_raw   * vol_scalar,
+    pos_carry    = carry_raw * vol_scalar,
     
     join_month_id = month_id %m+% months(1)
   ) %>%
-  select(join_month_id, pos_momentum, pos_carry)
+  filter(
+    is.finite(pos_momentum),
+    is.finite(pos_carry),
+    is.finite(carry_annual_yield)
+  ) %>%
+  select(join_month_id, pos_momentum, pos_carry, carry_annual_yield)
 
 # ==============================================================================
 # 4) Merge positions onto daily data; compute strategy returns and cumulative PnL
-#    Momentum trades DAILY_PRICE_RET only.
-#    Carry trades SYNTHETIC_TOTAL_RET (price + roll yield).
 # ==============================================================================
 strategy_wide <- full_data %>%
   left_join(monthly_rebal, by = c("month_id" = "join_month_id")) %>%
+  arrange(date) %>%
+  tidyr::fill(pos_momentum, pos_carry, carry_annual_yield, .direction = "down") %>%
+  filter(!is.na(pos_momentum), !is.na(pos_carry), !is.na(carry_annual_yield), !is.na(daily_price_ret)) %>%
   mutate(
-    pos_momentum = replace_na(pos_momentum, 0),
-    pos_carry    = replace_na(pos_carry, 0),
+    # carry accrual fixed within month (set at prior month-end)
+    daily_roll_yield    = carry_annual_yield / 252,
+    synthetic_total_ret = daily_price_ret + daily_roll_yield,
     
-    ret_mom      = pos_momentum * daily_price_ret,
-    ret_carry    = pos_carry    * synthetic_total_ret,
+    ret_mom   = pos_momentum * daily_price_ret,
+    ret_carry = pos_carry    * synthetic_total_ret,
     
-    cum_mom      = exp(cumsum(ret_mom)) - 1,
-    cum_carry    = exp(cumsum(ret_carry)) - 1
+    cum_mom   = exp(cumsum(ret_mom)) - 1,
+    cum_carry = exp(cumsum(ret_carry)) - 1
   ) %>%
   select(date, ret_mom, ret_carry, cum_mom, cum_carry)
 
@@ -147,20 +174,20 @@ strategy_long <- strategy_wide %>%
                values_to = "Return")
 
 # ==============================================================================
-# 5) Plots (Momentum alone, Carry alone, then combined)
+# 5) Plots
 # ==============================================================================
 cols   <- c("cum_mom" = "#E74C3C", "cum_carry" = "#2E5FA1")
 labels <- c("cum_mom" = "Momentum (MA20) — Price only",
-            "cum_carry" = "Carry (CL1 vs CL13) — Price + Roll")
+            "cum_carry" = "Carry C(1,13) — Price + Roll (accrued)")
 
 plot_mom <- ggplot(strategy_wide, aes(x = date, y = cum_mom)) +
   geom_line(linewidth = 0.8, color = cols["cum_mom"]) +
   scale_y_continuous(labels = percent_format(accuracy = 1)) +
   labs(
     title = "WTI Momentum Strategy",
-    subtitle = "Vol Target 15% | Trades price log returns (no roll yield)",
+    subtitle = "Vol Target 15% (no leverage) | Trades price log returns only",
     y = "Cumulative Return", x = "",
-    caption = "Signal: CL1 >= SMA(20). Position scaled by rolling vol of price returns."
+    caption = "Signal: CL1 >= SMA(20). Common vol scaler from price returns, capped at 1x."
   ) +
   theme_minimal() +
   theme(plot.title = element_text(face = "bold", size = 14),
@@ -171,9 +198,9 @@ plot_carry <- ggplot(strategy_wide, aes(x = date, y = cum_carry)) +
   scale_y_continuous(labels = percent_format(accuracy = 1)) +
   labs(
     title = "WTI Carry Strategy (Synthetic Total Return)",
-    subtitle = "Vol Target 15% | Trades price log returns + estimated roll yield",
+    subtitle = "Vol Target 15% (no leverage) | Price log returns + month-end carry accrual",
     y = "Cumulative Return", x = "",
-    caption = "Roll yield: ((CL1 - CL13)/CL1)/252. Signal: sign(CL1 - CL13)."
+    caption = "Carry: sign(CL1 - CL13). Roll accrual: ((CL1-CL13)/CL1)/252 locked at month-end, applied next month."
   ) +
   theme_minimal() +
   theme(plot.title = element_text(face = "bold", size = 14),
@@ -185,7 +212,7 @@ final_plot <- ggplot(strategy_long, aes(x = date, y = Return, color = Strategy))
   scale_y_continuous(labels = percent_format(accuracy = 1)) +
   labs(
     title = "Strategy Comparison: WTI Momentum vs. Carry",
-    subtitle = "Vol Target 15% | Momentum trades price only; Carry trades price + roll yield",
+    subtitle = "Vol Target 15% (no leverage) | Momentum: price only; Carry: price + roll accrual",
     y = "Cumulative Return", x = ""
   ) +
   theme_minimal() +
@@ -223,8 +250,10 @@ cat("  Ann. Return:    ", percent(mom_stats["mu"]), "\n")
 cat("  Ann. Vol:       ", percent(mom_stats["vol"]), "\n")
 cat("  Sharpe:         ", round(mom_stats["sharpe"], 2), "\n\n")
 
-cat("Carry (price + roll):\n")
+cat("Carry (price + roll accrual):\n")
 cat("  Total Return:   ", percent(last(strategy_wide$cum_carry)), "\n")
 cat("  Ann. Return:    ", percent(carry_stats["mu"]), "\n")
 cat("  Ann. Vol:       ", percent(carry_stats["vol"]), "\n")
 cat("  Sharpe:         ", round(carry_stats["sharpe"], 2), "\n")
+
+

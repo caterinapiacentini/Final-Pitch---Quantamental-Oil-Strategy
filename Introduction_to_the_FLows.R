@@ -165,3 +165,4 @@ cat("Total Strategy Return:", round((tail(trading_system$cum_strat, 1) - 1) * 10
 # Display Plots
 print(p_hf_shorts)
 print(p_equity)
+

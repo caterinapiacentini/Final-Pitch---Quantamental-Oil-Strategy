@@ -20,7 +20,7 @@ tryCatch({
     select(Date, Close) %>%
     rename(date = Date, fut_price = Close) %>%
     mutate(date = as.Date(date)) %>%
-    filter(date >= as.Date("1993-01-01") & date <= as.Date("2022-12-31"))
+    filter(date >= as.Date("1993-01-01") & date <= as.Date("2024-12-31"))
   
   # Linear interpolation for NAs
   futures_data <- futures_data %>%
@@ -237,7 +237,7 @@ carry_data <- tryCatch({
     na.omit()
 }, error = function(e) {
   # Dummy data for demo
-  dates <- seq(as.Date("1993-01-01"), as.Date("2022-12-31"), by="day")
+  dates <- seq(as.Date("1993-01-01"), as.Date("2024-12-31"), by="day")
   data.frame(date = dates, price_front = 50, price_back = 48)
 })
 

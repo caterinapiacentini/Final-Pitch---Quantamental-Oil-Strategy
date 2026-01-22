@@ -1,5 +1,5 @@
 # ==============================================================================
-# STRATEGY COMPARISON: WTI MOMENTUM VS CARRY (Fixed for NA Data Gaps)
+# STRATEGY COMPARISON: WTI MOMENTUM VS CARRY (Rebased to 2006-10-02)
 # ==============================================================================
 
 library(tidyverse)
@@ -9,6 +9,8 @@ library(scales)
 library(gridExtra)
 library(zoo)
 library(TTR)
+if (!require("writexl")) install.packages("writexl")
+library(writexl)
 
 # -----------------------------
 # INPUTS
@@ -21,6 +23,9 @@ TARGET_VOL <- 0.15
 VOL_WINDOW <- 60
 MA_WINDOW  <- 20
 LEV_CAP    <- 1.0
+
+# ** NEW: Date to start the Series / Plot **
+PLOT_START_DATE <- as.Date("2006-10-02")
 
 # -----------------------------
 # HELPER: Date Parsing
@@ -58,7 +63,7 @@ mom_processed <- mom_raw %>%
     ma_20           = SMA(price_front, n = MA_WINDOW),
     mom_raw         = ifelse(price_front >= ma_20, 1, -1)
   ) %>%
-  # Remove NAs created by Lag/SMA *before* Vol calc to satisfy TTR strictness
+  # Remove NAs created by Lag/SMA *before* Vol calc
   drop_na(daily_price_ret, mom_raw) %>%
   mutate(
     vol_mom = runSD(daily_price_ret, n = VOL_WINDOW) * sqrt(252),
@@ -73,7 +78,7 @@ tryCatch({
   carry_raw <- read_excel(FILE_CARRY) %>%
     mutate(date = parse_excel_date(Date)) %>%
     select(date, F1_Price, F13_Price) %>%
-    # CRITICAL FIX: Remove any rows with missing prices immediately
+    # Remove any rows with missing prices immediately
     drop_na(F1_Price, F13_Price) %>%
     arrange(date)
   
@@ -92,8 +97,7 @@ carry_processed <- carry_raw %>%
     carry_signal_raw = sign(carry_spread),
     carry_signal_raw = ifelse(carry_signal_raw == 0, 1, carry_signal_raw)
   ) %>%
-  # CRITICAL FIX: Drop the first NA from lag() BEFORE running runSD
-  # runSD fails if there are NAs anywhere in the vector
+  # Drop first NA from lag()
   drop_na(carry_underlying_ret) %>%
   mutate(
     # 3. Volatility
@@ -127,7 +131,7 @@ monthly_rebal <- full_data %>%
   filter(is.finite(pos_momentum), is.finite(pos_carry))
 
 # ==============================================================================
-# 3) PERFORMANCE & PLOTTING
+# 3) PERFORMANCE & PLOTTING (Strict Rebase to 0 at Start Date)
 # ==============================================================================
 strategy_wide <- full_data %>%
   left_join(monthly_rebal, by = c("month_id" = "join_month_id")) %>%
@@ -135,11 +139,21 @@ strategy_wide <- full_data %>%
   tidyr::fill(pos_momentum, pos_carry, .direction = "down") %>%
   filter(!is.na(pos_momentum), !is.na(pos_carry)) %>%
   mutate(
+    # 1. Calculate Daily Strategy Returns
     ret_mom_strat   = pos_momentum * mom_ret,
     ret_carry_strat = pos_carry * carry_ret,
     
-    cum_mom   = exp(cumsum(ret_mom_strat)) - 1,
-    cum_carry = exp(cumsum(ret_carry_strat)) - 1
+    # 2. Calculate Cumulative Index (starting from beginning of data)
+    idx_mom   = cumsum(ret_mom_strat),
+    idx_carry = cumsum(ret_carry_strat)
+  ) %>%
+  
+  # --- [CRITICAL FIX] Filter Date Range & Rebase to 0 ---
+  filter(date >= PLOT_START_DATE) %>%
+  mutate(
+    # Subtract the value of the FIRST row in this filtered set to force start at 0
+    cum_mom   = exp(idx_mom - first(idx_mom)) - 1,
+    cum_carry = exp(idx_carry - first(idx_carry)) - 1
   ) %>%
   select(date, ret_mom = ret_mom_strat, ret_carry = ret_carry_strat, cum_mom, cum_carry)
 
@@ -147,31 +161,22 @@ strategy_long <- strategy_wide %>%
   select(date, cum_mom, cum_carry) %>%
   pivot_longer(cols = c("cum_mom", "cum_carry"), names_to = "Strategy", values_to = "Return")
 
-# PLOTS
+# --- PLOTS ---
 cols   <- c("cum_mom" = "#E74C3C", "cum_carry" = "#2E5FA1")
 labels <- c("cum_mom" = "Momentum (MA20)", "cum_carry" = "Carry (F1 - F13)")
-
-plot_mom <- ggplot(strategy_wide, aes(x = date, y = cum_mom)) +
-  geom_line(linewidth = 0.8, color = cols["cum_mom"]) +
-  scale_y_continuous(labels = percent_format(accuracy = 1)) +
-  labs(title = "Momentum Strategy", y = "Cumulative Return", x = "") + theme_minimal()
-
-plot_carry <- ggplot(strategy_wide, aes(x = date, y = cum_carry)) +
-  geom_line(linewidth = 0.8, color = cols["cum_carry"]) +
-  scale_y_continuous(labels = percent_format(accuracy = 1)) +
-  labs(title = "Carry Strategy (Price Only)", subtitle = "Short Contango / Long Backwardation", y = "Cumulative Return", x = "") + theme_minimal()
 
 final_plot <- ggplot(strategy_long, aes(x = date, y = Return, color = Strategy)) +
   geom_line(linewidth = 0.8) +
   scale_color_manual(values = cols, labels = labels) +
   scale_y_continuous(labels = percent_format(accuracy = 1)) +
-  labs(title = "Strategy Comparison: WTI Momentum vs. Carry", y = "Cumulative Return", x = "") +
+  labs(title = paste("Strategy Comparison (Rebased to 0 at", PLOT_START_DATE, ")"), 
+       y = "Cumulative Return", x = "") +
   theme_minimal() + theme(legend.position = "top", legend.title = element_blank())
 
-gridExtra::grid.arrange(plot_mom, plot_carry, ncol = 1)
+gridExtra::grid.arrange(final_plot) # Just print the combined plot
 print(final_plot)
 
-# STATS
+# --- STATS ---
 ann_stats <- function(x) {
   mu  <- mean(x, na.rm = TRUE) * 252
   vol <- sd(x, na.rm = TRUE) * sqrt(252)
@@ -182,7 +187,7 @@ mom_stats   <- ann_stats(strategy_wide$ret_mom)
 carry_stats <- ann_stats(strategy_wide$ret_carry)
 cor_mc      <- cor(strategy_wide$ret_mom, strategy_wide$ret_carry, use = "complete.obs")
 
-cat("\n=== COMPARISON STATS ===\n")
+cat("\n=== COMPARISON STATS (Since 2006-10-02) ===\n")
 cat("Correlation: ", round(cor_mc, 3), "\n\n")
 cat("Momentum (Original):\n")
 cat("  Total Return:", percent(last(strategy_wide$cum_mom)), "\n")
@@ -190,3 +195,19 @@ cat("  Sharpe:      ", round(mom_stats["sharpe"], 2), "\n\n")
 cat("Carry (New WTI_TS):\n")
 cat("  Total Return:", percent(last(strategy_wide$cum_carry)), "\n")
 cat("  Sharpe:      ", round(carry_stats["sharpe"], 2), "\n")
+
+# ==============================================================================
+# 4) EXPORT TO EXCEL
+# ==============================================================================
+# Create a clean dataframe for export
+export_data <- strategy_wide %>%
+  select(date, cum_mom, cum_carry) %>%
+  rename(Date = date, 
+         Momentum_Cumulative = cum_mom, 
+         Carry_Cumulative = cum_carry)
+
+# Write to Excel file in your working directory
+write_xlsx(export_data, "WTI_Strategy_Returns_2006.xlsx")
+
+cat("\nData successfully exported to 'WTI_Strategy_Returns_2006.xlsx'\n")
+# ==============================================================================

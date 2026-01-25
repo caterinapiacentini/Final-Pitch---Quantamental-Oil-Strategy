@@ -166,11 +166,11 @@ grid.newpage()
 grid.draw(g_3panel)
 
 # 4) Export exactly 31.01cm x 5.72cm @ 600 dpi
-W_CM <- 22.76
+W_CM <- 15.29
 H_CM <- 13.01
 
 ragg::agg_png(
-  filename = "cftc_3panel_31.01x5.72cm_new.png",
+  filename = "cftc_3panel_31.01x5.72cm_new_new.png",
   width = W_CM, height = H_CM, units = "cm",
   res = 600
 )

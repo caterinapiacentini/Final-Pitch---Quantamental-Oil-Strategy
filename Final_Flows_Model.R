@@ -3,6 +3,12 @@
 # LOGIC: Entry requires HF Conviction (>0.5 Sigma) | Exit on Consensus Break
 # ==============================================================================
 
+# load required libraries for the following code
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(TTR)
+# Assume cot_raw and price_raw data frames are already loaded in the environment
 # --- 1. CONFIGURATION ---
 hf_threshold <- 1.5    
 fast_n       <- 4      
@@ -92,3 +98,83 @@ p4 <- ggplot(trading_system, aes(x=Date)) +
   scale_color_manual(values=c("Strategy"="navy", "Benchmark"="gray60")) + labs(title="Total Compounded Return", y="Equity") + theme_minimal()
 
 grid.arrange(p1, p2, p3, p4, ncol=1)
+
+library(scales)
+
+# 1) Scala X comune (stessi anni su tutti)
+x_min <- min(trading_system$Date, na.rm = TRUE)
+x_max <- max(trading_system$Date, na.rm = TRUE)
+
+x_common <- scale_x_date(
+  limits  = c(x_min, x_max),
+  breaks  = pretty_breaks(n = 6),   # oppure date_breaks("3 years")
+  labels  = date_format("%Y"),
+  expand  = c(0, 0)
+)
+
+# 2) Applica la scala comune a tutti e tre
+p1 <- p1 + x_common
+p2 <- p2 + x_common
+p3 <- p3 + x_common
+
+# 3) Rimuovi asse X da p1 e p2 (lascia solo sotto in p3)
+p1 <- p1 + theme(
+  axis.title.x = element_blank(),
+  axis.text.x  = element_blank(),
+  axis.ticks.x = element_blank()
+)
+
+p2 <- p2 + theme(
+  axis.title.x = element_blank(),
+  axis.text.x  = element_blank(),
+  axis.ticks.x = element_blank()
+)
+
+# (Opzionale) anche su p3: se non vuoi il titolo "Date" ma solo gli anni
+p3 <- p3 + theme(axis.title.x = element_blank())
+
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(ragg)
+
+# 1) Remove plot titles (and subtitles)
+remove_titles <- theme(
+  plot.title    = element_blank(),
+  plot.subtitle = element_blank()
+)
+
+p1 <- p1 + remove_titles
+p2 <- p2 + remove_titles
+p3 <- p3 + remove_titles
+
+# (Opzionale) Se vuoi anche togliere i titoli degli assi Y
+# p1 <- p1 + theme(axis.title.y = element_blank())
+# p2 <- p2 + theme(axis.title.y = element_blank())
+# p3 <- p3 + theme(axis.title.y = element_blank())
+
+# 2) Rebuild the grob AFTER modifications (this is the key)
+g_3panel <- arrangeGrob(
+  p1, p2, p3,
+  ncol = 1,
+  heights = c(1, 1, 1),
+  padding = unit(0, "pt")
+)
+
+# 3) Preview in RStudio (optional)
+grid.newpage()
+grid.draw(g_3panel)
+
+# 4) Export exactly 31.01cm x 5.72cm @ 600 dpi
+W_CM <- 31.01
+H_CM <- 5.72
+
+ragg::agg_png(
+  filename = "cftc_3panel_31.01x5.72cm_notitles.png",
+  width = W_CM, height = H_CM, units = "cm",
+  res = 600
+)
+grid::grid.newpage()
+grid::grid.draw(g_3panel)
+dev.off()
+

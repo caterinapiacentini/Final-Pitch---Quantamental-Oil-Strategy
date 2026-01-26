@@ -87,6 +87,107 @@ print(p1)
 print(p2)
 print(p3)
 
+
+# =========================================================
+# EXPORT DATA FOR POWERPOINT SCATTER PLOTS (Excel)
+# =========================================================
+# install.packages("writexl")  # if needed
+library(writexl)
+library(dplyr)
+
+# 1) Build the exact X/Y pairs used in the scatters
+hf_scatter <- merged_data %>%
+  transmute(
+    Date = Date,
+    X_Flow_HF = Flow_HF,
+    Y_Price_Change = Price_Change
+  ) %>%
+  filter(!is.na(X_Flow_HF), !is.na(Y_Price_Change))
+
+sd_scatter <- merged_data %>%
+  transmute(
+    Date = Date,
+    X_Flow_SD = Flow_SD,
+    Y_Price_Change = Price_Change
+  ) %>%
+  filter(!is.na(X_Flow_SD), !is.na(Y_Price_Change))
+
+# 2) Optional: add fitted (linear) values so you can draw the line even without PPT "Trendline"
+hf_fit <- lm(Y_Price_Change ~ X_Flow_HF, data = hf_scatter)
+sd_fit <- lm(Y_Price_Change ~ X_Flow_SD, data = sd_scatter)
+
+hf_scatter <- hf_scatter %>%
+  mutate(Y_Fitted = as.numeric(predict(hf_fit, newdata = hf_scatter)))
+
+sd_scatter <- sd_scatter %>%
+  mutate(Y_Fitted = as.numeric(predict(sd_fit, newdata = sd_scatter)))
+
+# 3) Summary sheet (correlations + regression coefficients)
+summary_tbl <- tibble::tibble(
+  Metric = c("Correlation HF vs PriceChange", "Correlation SD vs PriceChange",
+             "HF alpha (intercept)", "HF beta (slope)",
+             "SD alpha (intercept)", "SD beta (slope)"),
+  Value  = c(cor_hf, cor_sd,
+             coef(hf_fit)[1], coef(hf_fit)[2],
+             coef(sd_fit)[1], coef(sd_fit)[2])
+)
+
+# 4) Write Excel with 3 sheets
+out_file <- "PPTX_scatter_data_WTI_COT.xlsx"
+writexl::write_xlsx(
+  list(
+    "HF_scatter" = hf_scatter,
+    "SD_scatter" = sd_scatter,
+    "Summary"    = summary_tbl
+  ),
+  path = out_file
+)
+
+cat("Saved:", out_file, "\n")
+
+# =========================================================
+# EXPORT DATA FOR OVERLAY (LINE + 2 AREAS) (Excel)
+# =========================================================
+# install.packages("writexl")  # se serve
+library(writexl)
+library(dplyr)
+
+# Parametri di scaling (uguali al tuo ggplot)
+SCALE_DIV <- 5000
+SHIFT_ADD <- 40
+
+overlay_data <- merged_data %>%
+  transmute(
+    Date = Date,
+    WTI_Close = WTI_Close,
+    # serie trasformate per la visualizzazione "overlay"
+    HF_Area = Net_HF / SCALE_DIV + SHIFT_ADD,
+    SD_Area = Net_SD / SCALE_DIV + SHIFT_ADD,
+    # (opzionale) serie raw per controllo
+    Net_HF_raw = Net_HF,
+    Net_SD_raw = Net_SD
+  ) %>%
+  filter(!is.na(Date), !is.na(WTI_Close), !is.na(HF_Area), !is.na(SD_Area)) %>%
+  arrange(Date)
+
+summary_overlay <- tibble::tibble(
+  Item = c("Scaling divisor", "Shift add"),
+  Value = c(SCALE_DIV, SHIFT_ADD)
+)
+
+out_file2 <- "PPTX_overlay_data_WTI_COT.xlsx"
+writexl::write_xlsx(
+  list(
+    "Overlay" = overlay_data,
+    "Summary" = summary_overlay
+  ),
+  path = out_file2
+)
+
+cat("Saved:", out_file2, "\n")
+
+
+#######################################################
 z_thresh <- 1.5
 
 
